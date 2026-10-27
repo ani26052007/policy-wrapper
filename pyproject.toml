@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "policy-wrapper"
+version = "0.1.0"
+description = "GR00T N1.6 client and policy server for Isaac Lab Arena evaluation"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = ["numpy", "pyyaml", "torch", "gymnasium", "opencv-python-headless"]
+
+[project.optional-dependencies]
+test = ["pytest", "pyzmq", "msgpack"]
+
+[tool.setuptools.packages.find]
+include = ["policy_wrapper*"]
+
+[tool.setuptools.package-data]
+"policy_wrapper.embodiments.gr1" = ["*.yaml", "*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

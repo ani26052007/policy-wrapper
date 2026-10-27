@@ -1,0 +1,42 @@
+policy-wrapper
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository contains files copied from Isaac Lab-Arena
+(https://github.com/isaac-sim/IsaacLab-Arena), commit 7632eb7d5e, licensed under the
+Apache License, Version 2.0. Copyright (c) 2025-2026, The Isaac Lab Arena Project Developers.
+The copied files keep their original copyright and SPDX headers.
+
+Copied files (source path in Isaac Lab-Arena -> path here):
+  isaaclab_arena_gr00t/policy/__init__.py                              -> policy_wrapper/policy/__init__.py
+  isaaclab_arena_gr00t/policy/gr00t_core.py                            -> policy_wrapper/policy/gr00t_core.py
+  isaaclab_arena_gr00t/policy/gr00t_remote_closedloop_policy.py        -> policy_wrapper/policy/gr00t_remote_closedloop_policy.py
+  isaaclab_arena_gr00t/policy/config/__init__.py                       -> policy_wrapper/policy/config/__init__.py
+  isaaclab_arena_gr00t/policy/config/gr00t_closedloop_policy_config.py -> policy_wrapper/policy/config/gr00t_closedloop_policy_config.py
+  isaaclab_arena_gr00t/policy/config/task_mode.py                      -> policy_wrapper/policy/config/task_mode.py
+  isaaclab_arena/policy/action_scheduling/__init__.py                  -> policy_wrapper/scheduling/__init__.py
+  isaaclab_arena/policy/action_scheduling/action_scheduler.py          -> policy_wrapper/scheduling/action_scheduler.py
+  isaaclab_arena/policy/action_scheduling/action_chunk_scheduler.py    -> policy_wrapper/scheduling/action_chunk_scheduler.py
+  isaaclab_arena/policy/action_scheduling/synced_batch_action_scheduler.py -> policy_wrapper/scheduling/synced_batch_action_scheduler.py
+  isaaclab_arena_gr00t/utils/__init__.py                               -> policy_wrapper/utils/__init__.py
+  isaaclab_arena_gr00t/utils/image_conversion.py                       -> policy_wrapper/utils/image_conversion.py
+  isaaclab_arena_gr00t/utils/io_utils.py                               -> policy_wrapper/utils/io_utils.py
+  isaaclab_arena_gr00t/utils/joints_conversion.py                      -> policy_wrapper/utils/joints_conversion.py
+  isaaclab_arena_gr00t/utils/robot_joints.py                           -> policy_wrapper/utils/robot_joints.py
+  isaaclab_arena_gr00t/embodiments/__init__.py                         -> policy_wrapper/embodiments/__init__.py
+  isaaclab_arena_gr00t/embodiments/gr1/*                               -> policy_wrapper/embodiments/gr1/*
+  isaaclab_arena_gr00t/tests/test_gr00t_remote_closedloop_policy.py    -> tests/test_gr00t_remote_closedloop_policy.py
+
+Changes made to the copied files:
+  - imports of isaaclab_arena_gr00t.* and isaaclab_arena.policy.action_scheduling are rewritten to
+    policy_wrapper.*; PolicyBase, PolicyCfg and register_policy come from policy_wrapper/_arena.py,
+    which imports them from Isaac Lab-Arena when it is installed;
+  - gr00t_core.py: the isaaclab_arena_g1 constants are imported only in the G1 branch;
+  - gr00t_closedloop_policy_config.py: fields `scheduler` and `bgr_conversion`;
+  - gr00t_core.py: resize_rgb_for_policy takes `bgr_conversion`;
+  - gr00t_remote_closedloop_policy.py: the policy config is the `client:` section of
+    config/eval.yaml (policy_wrapper/eval_config.py), which also selects the scheduler; each request
+    sends a sampling seed in `options`; registered as `policy_wrapper_gr00t_remote_closedloop`;
+  - the test is re-pointed at the GR1 pilot configuration.
+
+Isaac-GR00T is licensed under the NVIDIA License and no part of it is included. tests/fake_gr00t
+contains test stand-ins written for this repository.

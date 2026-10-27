@@ -1,0 +1,2 @@
+{"_comment": "FIXTURE: shape of a GR00T statistics.json, made-up values, not from the checkpoint",
+ "gr1": {"action": {"left_arm": {"min": [-1, -1, -1, -1, -1, -1, -1], "max": [1, 1, 1, 1, 1, 1, 1]}}}}
