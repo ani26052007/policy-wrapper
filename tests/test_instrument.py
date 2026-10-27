@@ -11,7 +11,8 @@ import pytest
 import torch
 
 from policy_wrapper import instrument as I
-from policy_wrapper.instrument import Instrument, NullInstrument, TaggedAction, frame_stats, make_instrument
+from policy_wrapper.instrument import (Instrument, NullInstrument, TaggedAction, content_hash, frame_stats,
+                                       make_instrument)
 from policy_wrapper.policy import gr00t_core
 from policy_wrapper.policy.gr00t_remote_closedloop_policy import (
     Gr00tRemoteClosedloopPolicy,
@@ -105,20 +106,21 @@ def episodes(out) -> dict:
 def test_disabled_instrumentation_writes_nothing_and_returns_the_same_actions(tmp_path, monkeypatch):
     monkeypatch.delenv(I.ENV_DIR, raising=False)
     assert isinstance(make_instrument(2), NullInstrument)
-    calls = []
-    real = I.frame_stats
+    calls, hashed = [], []
+    real, real_hash = I.frame_stats, I.content_hash
     monkeypatch.setattr(I, "frame_stats", lambda *a, **k: calls.append(1) or real(*a, **k))
+    monkeypatch.setattr(I, "content_hash", lambda *a, **k: hashed.append(1) or real_hash(*a, **k))
     with ServerThread(make_policy) as server:
         policy = client(server.port)
         assert policy._instrument.steps is None
         off = run_episode(policy, CHUNK + 3)
         policy.close()
-        assert calls == [] and not list(tmp_path.rglob("*.json"))
+        assert calls == [] and hashed == [] and not list(tmp_path.rglob("*.json"))
         monkeypatch.setenv(I.ENV_DIR, str(tmp_path / "on"))
         policy = client(server.port)
         on = run_episode(policy, CHUNK + 3)
         policy.close()
-    assert calls and len(list((tmp_path / "on").glob("*.json"))) == NUM_ENVS
+    assert calls and hashed and len(list((tmp_path / "on").glob("*.json"))) == NUM_ENVS
     assert all(torch.equal(a, b) for a, b in zip(off, on))
 
 
@@ -137,6 +139,46 @@ def test_frames_are_the_observation_exactly_as_the_server_received_it_and_the_en
             assert (f["camera"], f["sim_camera"]) == (VIDEO_KEY, CAMERA)
             assert f["policy_input"] == frame_stats(sent["video"][VIDEO_KEY][e, -1])
             assert f["render"] == frame_stats(observation(f["step"])["camera_obs"][CAMERA][e])
+
+
+def test_content_hash_depends_on_bytes_dtype_and_shape_only():
+    img = gradient_image()
+    assert content_hash(img) == content_hash(img.copy()) == content_hash(torch.from_numpy(img))
+    assert content_hash(img).startswith("blake2b-128:") and len(content_hash(img)) == len("blake2b-128:") + 32
+    changed = img.copy()
+    changed[0, 0, 0] ^= 1
+    assert content_hash(changed) != content_hash(img)
+    assert content_hash(img[::-1]) != content_hash(img)                  # same bytes multiset, other order
+    assert content_hash(img.astype(np.int16)) != content_hash(img)
+    assert content_hash(img.reshape(48, 64, 3)) != content_hash(img)
+
+
+def test_every_image_sent_is_hashed_at_every_request_next_to_the_frame_stats(instrumented, monkeypatch):
+    monkeypatch.setenv(I.ENV_FRAME_EVERY, str(3 * CHUNK))               # frame stats at the first request only
+    with ServerThread(make_policy) as server:
+        policy = client(server.port)
+        run_episode(policy, 2 * CHUNK + 1)
+        policy.close()
+        received = server.server.policy.policy.observations
+    assert len(received) == 3
+    for e in range(NUM_ENVS):
+        ep = episodes(instrumented)[f"env{e:04d}_ep00000.json"]
+        assert len(ep["frames"]) == 1 and len(ep["chunks"]) == 3
+        for c, sent in zip(ep["chunks"], received):
+            frames = sent["video"][VIDEO_KEY][e]
+            assert c["sent_hashes"] == {VIDEO_KEY: [content_hash(f) for f in frames]}
+        assert ep["frames"][0]["policy_input_hash"] == content_hash(received[0]["video"][VIDEO_KEY][e, -1])
+        assert len({c["sent_hashes"][VIDEO_KEY][-1] for c in ep["chunks"]}) == 3   # fresh frames: all differ
+
+
+def test_a_stale_frame_reused_by_the_client_shows_as_a_repeated_hash(instrumented):
+    with ServerThread(make_policy) as server:
+        policy = client(server.port)
+        for t in range(2 * CHUNK + 1):
+            policy.get_action(None, observation(0))                     # the same camera frame every step
+        policy.close()
+    ep = episodes(instrumented)["env0000_ep00000.json"]
+    assert len({c["sent_hashes"][VIDEO_KEY][-1] for c in ep["chunks"]}) == 1 and len(ep["chunks"]) == 3
 
 
 def test_raw_actions_are_logged_exactly_as_the_server_returned_them(instrumented):

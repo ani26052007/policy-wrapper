@@ -15,6 +15,12 @@ the logs instead of being hidden by them:
   preprocessing step) as ``policy_input``, and the environment's camera frame they came from (before
   any preprocessing) as ``render``. One sample per env at most every ``frame_every`` steps. The summary
   has the fields of the router's ``FrameStats`` (``frame_stats``).
+* **Frame hashes.** ``on_request`` also hashes every image of the dict sent to the server
+  (``content_hash``: blake2b of dtype, shape and bytes), at every request, not only at the sampled
+  steps. The chunk record of each request carries them as ``sent_hashes`` (per video key, oldest frame
+  first), and each frame sample carries the hash of the image its ``policy_input`` summarises
+  (``policy_input_hash``). Two requests with the same hash sent the same image: a stale observation
+  reused by the client is visible in the logs, although no router check reads it yet.
 * **Actions.** ``on_reply`` stores each env's chunk exactly as the server returned it, with the step of
   the observation it was computed from.
 * **Timing.** Every action carries a tag (``TaggedAction``): the step of the observation its chunk was
@@ -40,6 +46,7 @@ are ``NullInstrument``'s: no counters, no statistics, no files, and ``on_step`` 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -107,6 +114,15 @@ def frame_stats(frame: Any, buckets: int = DEFAULT_PROFILE_BUCKETS) -> dict[str,
         "saturated_fraction": float((x >= top).all(axis=2).mean()),
         "missing_texture_fraction": 0.0,
     }
+
+
+def content_hash(image: Any) -> str:
+    """Content hash of one image as sent: blake2b (128 bit) over its dtype, shape and C-order bytes."""
+    a = np.ascontiguousarray(image.detach().cpu().numpy() if isinstance(image, torch.Tensor) else np.asarray(image))
+    h = hashlib.blake2b(digest_size=16)
+    h.update(f"{a.dtype.str}|{','.join(map(str, a.shape))}|".encode())
+    h.update(a.tobytes())
+    return "blake2b-128:" + h.hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -184,6 +200,7 @@ class Instrument:
         self.steps = torch.zeros(num_envs, dtype=torch.int64)
         self._last_frame: list[int | None] = [None] * num_envs
         self._request_steps: np.ndarray | None = None
+        self._request_hashes: list[dict[str, list[str]]] | None = None
         self._episodes = [_Episode(0) for _ in range(num_envs)]
         self._next_start = 0
         self.written: list[Path] = []
@@ -193,6 +210,10 @@ class Instrument:
         self._request_steps = steps
         video = sent["video"]
         pairs = list(zip(camera_names, video))
+        arrays = {key: _to_numpy(video[key]) for key in video}
+        hashes = [{key: [content_hash(frame) for frame in a[e]] for key, a in arrays.items()}
+                  for e in range(self.num_envs)]
+        self._request_hashes = hashes
         for e in range(self.num_envs):
             last = self._last_frame[e]
             if last is not None and steps[e] - last < self.frame_every:
@@ -201,17 +222,20 @@ class Instrument:
             for sim_camera, key in pairs:
                 self._episodes[e].frames.append({
                     "step": int(steps[e]), "camera": key, "sim_camera": sim_camera,
-                    "policy_input": frame_stats(_to_numpy(video[key])[e, -1], self.profile_buckets),
+                    "policy_input": frame_stats(arrays[key][e, -1], self.profile_buckets),
+                    "policy_input_hash": hashes[e][key][-1],
                     "render": frame_stats(_to_numpy(observation["camera_obs"][sim_camera][e]), self.profile_buckets),
                 })
 
     def on_reply(self, actions: Mapping[str, Any]) -> None:
         steps = self._request_steps if self._request_steps is not None else self.steps.numpy().copy()
-        self._request_steps = None
+        hashes = self._request_hashes
+        self._request_steps = self._request_hashes = None
         arrays = {k: _to_numpy(v) for k, v in actions.items()}
         for e in range(self.num_envs):
             self._episodes[e].chunks.append({"obs_step": int(steps[e]),
-                                             "raw": {k: a[e].tolist() for k, a in arrays.items()}})
+                                             "raw": {k: a[e].tolist() for k, a in arrays.items()},
+                                             "sent_hashes": hashes[e] if hashes is not None else None})
 
     def on_step(self, observation: Mapping[str, Any], tagged: TaggedAction) -> torch.Tensor:
         obs_step = _to_numpy(tagged.obs_step).reshape(-1)
