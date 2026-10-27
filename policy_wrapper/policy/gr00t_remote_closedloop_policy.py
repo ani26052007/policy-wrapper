@@ -29,6 +29,7 @@ from policy_wrapper.policy.gr00t_core import (
     load_gr00t_joint_configs,
 )
 from policy_wrapper.eval_config import load_client_config
+from policy_wrapper.instrument import TaggedAction, make_instrument
 from policy_wrapper.seeding import request_seed
 from policy_wrapper.utils.io_utils import load_gr00t_modality_config_from_file
 
@@ -130,6 +131,8 @@ class Gr00tRemoteClosedloopPolicy(PolicyBase[Gr00tRemoteClosedloopPolicyCfg]):
             raise ConnectionError(f"Cannot reach GR00T policy server at {config.remote_host}:{config.remote_port}")
 
         self.task_description: str | None = None
+        # Instrumentation hooks (no-ops unless the evaluation harness switches them on)
+        self._instrument = make_instrument(self.num_envs)
         # Per-request sampling seed sent to the server: (config seed, reset count, request index)
         self._num_resets = 0
         self._num_requests = 0
@@ -149,13 +152,18 @@ class Gr00tRemoteClosedloopPolicy(PolicyBase[Gr00tRemoteClosedloopPolicyCfg]):
 
     def get_action(self, env: gym.Env, observation: dict[str, Any]) -> torch.Tensor:
         assert self._chunking_state is not None, "GR00T remote policy has been closed"
+        return self._instrument.on_step(observation, self._next_action(observation))
+
+    def _next_action(self, observation: dict[str, Any]) -> TaggedAction:
+        """The scheduler's next action per env, tagged with the observation step of its chunk."""
 
         def fetch_chunk() -> torch.Tensor:
             return self._get_action_chunk(observation, self.policy_config.pov_cam_name_sim)
 
-        return self._chunking_state.get_action(
+        return self._chunking_state.get_tagged_action(
             fetch_chunk,
             hold_action=self._extract_hold_action(observation),
+            obs_step=self._instrument.steps,
         )
 
     def _extract_hold_action(self, observation: dict[str, Any]) -> torch.Tensor:
@@ -196,7 +204,9 @@ class Gr00tRemoteClosedloopPolicy(PolicyBase[Gr00tRemoteClosedloopPolicyCfg]):
         # 2. Call GR00T's own client
         seed = request_seed(self.policy_config.seed, self._num_resets, self._num_requests)
         self._num_requests += 1
+        self._instrument.on_request(observation, policy_observations, camera_names)
         robot_action_policy, _ = self._client.get_action(policy_observations, options={"seed": seed})
+        self._instrument.on_reply(robot_action_policy)
 
         # 3. Action translation from policy output to sim action tensor
         action_tensor = build_gr00t_action_tensor(
@@ -212,6 +222,7 @@ class Gr00tRemoteClosedloopPolicy(PolicyBase[Gr00tRemoteClosedloopPolicyCfg]):
         return action_tensor
 
     def reset(self, env_ids: torch.Tensor | None = None):
+        self._instrument.on_reset(env_ids)
         if env_ids is None:
             env_ids = slice(None)
         assert self._client is not None, "GR00T remote policy has been closed"
@@ -223,6 +234,12 @@ class Gr00tRemoteClosedloopPolicy(PolicyBase[Gr00tRemoteClosedloopPolicyCfg]):
 
     def close(self) -> None:
         """Release Arena-side resources for the remote GR00T policy client."""
+        try:
+            self._close_client()
+        finally:
+            self._instrument.close()
+
+    def _close_client(self) -> None:
         client = self._client
         try:
             if client is not None:

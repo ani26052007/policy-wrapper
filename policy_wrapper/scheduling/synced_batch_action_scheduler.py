@@ -10,6 +10,7 @@ from __future__ import annotations
 import torch
 from collections.abc import Callable
 
+from policy_wrapper.instrument import TaggedAction
 from policy_wrapper.scheduling.action_chunk_scheduler import ActionChunkScheduler
 
 
@@ -25,11 +26,12 @@ class SyncedBatchActionScheduler(ActionChunkScheduler):
       (action_chunk_length - 1) steps before receiving a fresh action tensor
     """
 
-    def get_action(
+    def get_tagged_action(
         self,
         fetch_action_tensor_fn: Callable[[], torch.Tensor],
         hold_action: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        obs_step: torch.Tensor | None = None,
+    ) -> TaggedAction:
         """Return one action per env, fetching only when all envs need a new chunk.
 
         Args:
@@ -37,6 +39,7 @@ class SyncedBatchActionScheduler(ActionChunkScheduler):
             hold_action: (num_envs, action_dim) current robot joint state; applied
                 to envs that are waiting for others to catch up. Required for this
                 scheduler — defaulted to ``None`` only to match the base API.
+            obs_step: (num_envs,) step of the current observation; a chunk fetched now is tagged with it.
         """
         if hold_action is None:
             raise ValueError("SyncedBatchActionScheduler.get_action requires a hold_action tensor")
@@ -49,11 +52,16 @@ class SyncedBatchActionScheduler(ActionChunkScheduler):
             self.current_action_chunk[:] = new_chunk
             self.current_action_index[:] = 0
             self.env_requires_new_chunk[:] = False
+            if obs_step is not None:
+                self.current_chunk_obs_step[:] = obs_step.to(self.current_chunk_obs_step)
 
         waiting = self.env_requires_new_chunk
         batch_idx = torch.arange(self.num_envs, device=self.device)
         action = self.current_action_chunk[batch_idx, self.current_action_index.clamp(min=0)]
         action[waiting] = hold_action[waiting]
+        tag_obs_step = self.current_chunk_obs_step.clone()
+        tag_obs_step[waiting] = -1
+        tagged = TaggedAction(action, tag_obs_step, self.current_action_index.clamp(min=0).to(torch.int64))
 
         self.current_action_index[~waiting] += 1
         exhausted = (~waiting) & (self.current_action_index >= self.action_chunk_length)
@@ -61,4 +69,4 @@ class SyncedBatchActionScheduler(ActionChunkScheduler):
         self.current_action_index[exhausted] = -1
         self.env_requires_new_chunk[exhausted] = True
 
-        return action
+        return tagged

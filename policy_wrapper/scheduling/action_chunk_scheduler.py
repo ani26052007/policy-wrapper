@@ -10,6 +10,7 @@ from __future__ import annotations
 import torch
 from collections.abc import Callable
 
+from policy_wrapper.instrument import TaggedAction
 from policy_wrapper.scheduling.action_scheduler import ActionScheduler
 
 
@@ -44,6 +45,8 @@ class ActionChunkScheduler(ActionScheduler):
         # True means the action chunk is not yet computed, False means the action
         self.current_action_index = torch.zeros(num_envs, dtype=torch.int32, device=device)
         self.env_requires_new_chunk = torch.ones(num_envs, dtype=torch.bool, device=device)
+        # Observation step each env's current chunk was computed from (-1: not tagged)
+        self.current_chunk_obs_step = torch.full((num_envs,), -1, dtype=torch.int64, device=device)
 
         # Fetch-efficiency tracking: how many times each env triggered a chunk fetch,
         # and how many envs actually needed the fetch vs. total (wasted compute detection).
@@ -51,11 +54,12 @@ class ActionChunkScheduler(ActionScheduler):
         self._total_envs_needed: int = 0
         self._per_env_fetch_count = torch.zeros(num_envs, dtype=torch.int64, device=device)
 
-    def get_action(
+    def get_tagged_action(
         self,
         fetch_action_tensor_fn: Callable[[], torch.Tensor],
         hold_action: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        obs_step: torch.Tensor | None = None,
+    ) -> TaggedAction:
         """Return one action per env, refilling the chunk when needed.
 
         fetch_action_tensor_fn() must return a tensor of shape (num_envs, horizon, action_dim)
@@ -71,6 +75,8 @@ class ActionChunkScheduler(ActionScheduler):
             mask = self.env_requires_new_chunk
             self.current_action_chunk[mask] = new_chunk[mask]
             self.current_action_index[mask] = 0
+            if obs_step is not None:
+                self.current_chunk_obs_step[mask] = obs_step.to(self.current_chunk_obs_step)[mask]
             self.env_requires_new_chunk[mask] = False
 
             self._n_fetch_calls += 1
@@ -90,6 +96,7 @@ class ActionChunkScheduler(ActionScheduler):
             self.num_envs,
             self.action_dim,
         ), f"{action.shape=} != ({self.num_envs}, {self.action_dim})"
+        tagged = TaggedAction(action, self.current_chunk_obs_step.clone(), self.current_action_index.to(torch.int64))
 
         self.current_action_index += 1
         reset_env_ids = self.current_action_index == self.action_chunk_length
@@ -97,7 +104,7 @@ class ActionChunkScheduler(ActionScheduler):
         self.env_requires_new_chunk = self.current_action_index >= self.action_chunk_length
         self.current_action_index[reset_env_ids] = -1
 
-        return action
+        return tagged
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         """Reset chunking state for the given envs (all if None)."""
@@ -106,3 +113,4 @@ class ActionChunkScheduler(ActionScheduler):
         self.current_action_chunk[env_ids] = 0.0
         self.current_action_index[env_ids] = -1
         self.env_requires_new_chunk[env_ids] = True
+        self.current_chunk_obs_step[env_ids] = -1
