@@ -36,7 +36,12 @@ Changes made to the copied files:
   - gr00t_remote_closedloop_policy.py: the policy config is the `client:` section of
     config/eval.yaml (policy_wrapper/eval_config.py), which also selects the scheduler; each request
     sends a sampling seed in `options`; registered as `policy_wrapper_gr00t_remote_closedloop`;
-  - the test is re-pointed at the GR1 pilot configuration.
+  - the test is re-pointed at the GR1 pilot configuration;
+  - scheduling/*: `get_tagged_action` returns the action with its tag (the observation step of its
+    chunk and its index in it, `policy_wrapper/instrument.py` TaggedAction); `get_action` is now a
+    concrete wrapper on the base class that returns the action alone;
+  - gr00t_remote_closedloop_policy.py: calls the instrumentation hooks of policy_wrapper/instrument.py
+    (request, reply, step, reset, close); the scheduler call moved into `_next_action`.
 
 Isaac-GR00T is licensed under the NVIDIA License and no part of it is included. tests/fake_gr00t
 contains test stand-ins written for this repository.
