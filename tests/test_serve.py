@@ -16,23 +16,22 @@ import yaml
 
 from policy_wrapper.serve import ServerSection, SeededPolicy, build_policy, load_server_section, resolve_checkpoint
 from tests.conftest import FAKE_GR00T
-from tests.helpers import EVAL_YAML, FIXTURES, REPO, eval_variant, free_port
+from tests.helpers import EVAL_YAML, FIXTURES, REPO, TEST_CONFIG, eval_variant, free_port
 
 CKPT = FIXTURES / "checkpoint"
 
 
 def section(**kw) -> ServerSection:
-    base = load_server_section(EVAL_YAML)
-    return ServerSection(**{**base.__dict__, **kw})
+    return ServerSection(**{**TEST_CONFIG["server"], **kw})
 
 
-def test_the_server_section_is_the_pilot_and_is_read_strictly(tmp_path):
-    s = load_server_section(EVAL_YAML)
-    assert s == ServerSection("nvidia/GN1.6-Tuned-Arena-GR1-PlaceItemCloseDoor-Task/ranch_bottle_into_fridge",
-                              "TODO_PIN", "GR1", 4, True, None)
+def test_the_server_section_is_read_strictly(tmp_path, fixed_yaml):
+    assert load_server_section(fixed_yaml) == ServerSection(
+        "nvidia/GN1.6-Tuned-Arena-GR1-PlaceItemCloseDoor-Task/ranch_bottle_into_fridge", "TODO_PIN", "GR1", 4, True, None)
+    assert load_server_section(EVAL_YAML) == ServerSection(**yaml.safe_load(EVAL_YAML.read_text())["server"])
     with pytest.raises(AssertionError, match="unknown server keys"):
         load_server_section(eval_variant(tmp_path / "a", server={"num_inference_timesteps": 8}))
-    cfg = yaml.safe_load(EVAL_YAML.read_text())
+    cfg = yaml.safe_load(fixed_yaml.read_text())
     del cfg["server"]["seed_per_request"]
     (tmp_path / "b" / "config").mkdir(parents=True)
     (tmp_path / "b" / "config" / "eval.yaml").write_text(yaml.safe_dump(cfg))
@@ -87,12 +86,12 @@ def test_norm_stats_override_replaces_the_statistics(tmp_path):
     assert rel.policy.processor.set_statistics_calls[0][1] is True
 
 
-def test_the_server_process_answers_ping_and_get_action_and_stops_on_kill(tmp_path):
+def test_the_server_process_answers_ping_and_get_action_and_stops_on_kill(tmp_path, fixed_yaml):
     from gr00t.policy.server_client import PolicyClient
 
     port = free_port()
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(FAKE_GR00T), str(REPO)])}
-    proc = subprocess.Popen([sys.executable, "-m", "policy_wrapper.serve", "--config", str(EVAL_YAML),
+    proc = subprocess.Popen([sys.executable, "-m", "policy_wrapper.serve", "--config", str(fixed_yaml),
                              "--host", "127.0.0.1", "--port", str(port), "--device", "cpu",
                              "--checkpoint-dir", str(CKPT)],
                             cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

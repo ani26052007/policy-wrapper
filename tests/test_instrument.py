@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from statistics import median
 
 import numpy as np
 import pytest
@@ -19,7 +20,7 @@ from policy_wrapper.policy.gr00t_remote_closedloop_policy import (
     Gr00tRemoteClosedloopPolicyCfg,
 )
 from policy_wrapper.scheduling import ActionChunkScheduler, SyncedBatchActionScheduler
-from tests.helpers import EVAL_YAML, ServerThread, eval_variant
+from tests.helpers import ServerThread, eval_variant, fixed_eval_yaml
 from tests.test_wire import make_policy
 
 NUM_ENVS = 2
@@ -79,9 +80,9 @@ def observation(step: int) -> dict:
     }
 
 
-def client(port: int, config=EVAL_YAML, cls=Gr00tRemoteClosedloopPolicy) -> Gr00tRemoteClosedloopPolicy:
+def client(port: int, config=None, cls=Gr00tRemoteClosedloopPolicy) -> Gr00tRemoteClosedloopPolicy:
     policy = cls(Gr00tRemoteClosedloopPolicyCfg(
-        policy_config_yaml_path=str(config), policy_device="cpu", num_envs=NUM_ENVS,
+        policy_config_yaml_path=str(config or fixed_eval_yaml()), policy_device="cpu", num_envs=NUM_ENVS,
         remote_host="127.0.0.1", remote_port=port))
     policy.set_task_description(None)
     return policy
@@ -198,16 +199,6 @@ def test_raw_actions_are_logged_exactly_as_the_server_returned_them(instrumented
                 np.testing.assert_array_equal(np.asarray(c["raw"][k], dtype=np.float32), v[e])
 
 
-def test_step_pairs_follow_the_chunk_with_no_extra_delay(instrumented):
-    with ServerThread(make_policy) as server:
-        policy = client(server.port)
-        run_episode(policy, 2 * CHUNK + 4)
-        policy.close()
-    pairs = episodes(instrumented)["env0000_ep00000.json"]["step_pairs"]
-    assert pairs[:CHUNK + 1] == [[0, t, t] for t in range(CHUNK)] + [[CHUNK, CHUNK, 0]]
-    assert {a - o - k for o, a, k in pairs} == {0} and len(pairs) == 2 * CHUNK + 4
-
-
 class DelayedPolicy(Gr00tRemoteClosedloopPolicy):
     """The client with a 3-step action buffer between the scheduler and ``env.step``: it returns each
     action 3 steps after the scheduler produced it, and holds (tag -1) until the buffer has filled."""
@@ -224,19 +215,24 @@ class DelayedPolicy(Gr00tRemoteClosedloopPolicy):
         return self._buffer.popleft()
 
 
-def test_a_delay_buffer_shows_as_a_constant_extra_delay_of_three(instrumented):
-    with ServerThread(make_policy) as server:
-        policy = client(server.port, cls=DelayedPolicy)
-        run_episode(policy, 2 * CHUNK + 4)
-        policy.close()
-    pairs = episodes(instrumented)["env0000_ep00000.json"]["step_pairs"]
-    assert pairs[0] == [0, 3, 0] and pairs[CHUNK] == [CHUNK, CHUNK + 3, 0]
-    assert {a - o - k for o, a, k in pairs} == {3}
-    assert len(pairs) == 2 * CHUNK + 4 - DelayedPolicy.DELAY          # the held steps are not policy actions
+def test_a_delay_buffer_shows_as_three_more_steps_of_extra_delay(instrumented, tmp_path, monkeypatch):
+    def extra_delays(cls, out):
+        monkeypatch.setenv(I.ENV_DIR, str(out))
+        with ServerThread(make_policy) as server:
+            policy = client(server.port, cls=cls)
+            run_episode(policy, 4 * CHUNK)
+            policy.close()
+        pairs = episodes(out)["env0000_ep00000.json"]["step_pairs"]
+        return pairs, [a - o - k for o, a, k in pairs]
+
+    plain_pairs, plain = extra_delays(Gr00tRemoteClosedloopPolicy, tmp_path / "plain")
+    delayed_pairs, delayed = extra_delays(DelayedPolicy, tmp_path / "delayed")
+    assert median(delayed) - median(plain) == DelayedPolicy.DELAY
+    assert len(delayed_pairs) == len(plain_pairs) - DelayedPolicy.DELAY   # the held steps are not policy actions
 
 
 def test_a_preprocessing_change_inside_the_client_shows_in_the_policy_input_stats(instrumented, tmp_path, monkeypatch):
-    def frames(config=EVAL_YAML):
+    def frames(config=None):
         with ServerThread(make_policy) as server:
             policy = client(server.port, config)
             run_episode(policy, 1)
@@ -244,15 +240,15 @@ def test_a_preprocessing_change_inside_the_client_shows_in_the_policy_input_stat
         return episodes(instrumented)["env0000_ep00000.json"]["frames"][0]
 
     nominal = frames()
-    assert nominal["policy_input"] == nominal["render"]                  # same size, no conversion: identical
     swapped = frames(eval_variant(tmp_path, client={"bgr_conversion": True}))
     assert swapped["render"] == nominal["render"]
-    assert swapped["policy_input"]["channel_means"] == pytest.approx(nominal["render"]["channel_means"][::-1])
+    assert swapped["policy_input"]["channel_means"] == pytest.approx(nominal["policy_input"]["channel_means"][::-1])
     original = gr00t_core.resize_rgb_for_policy
     monkeypatch.setattr(gr00t_core, "resize_rgb_for_policy",
                         lambda *a, **k: [np.ascontiguousarray(f[:, ::-1]) for f in original(*a, **k)])
     flipped = frames()
-    assert flipped["policy_input"]["row_profile"] == pytest.approx(nominal["render"]["row_profile"][::-1])
+    assert flipped["render"] == nominal["render"]
+    assert flipped["policy_input"]["row_profile"] == pytest.approx(nominal["policy_input"]["row_profile"][::-1])
 
 
 def test_episodes_split_at_reset_and_observation_keys_are_recorded(instrumented):

@@ -33,7 +33,7 @@ import pytest
 
 from policy_wrapper import scheduling as action_scheduling
 from policy_wrapper.policy import gr00t_remote_closedloop_policy as gr00t_policy
-from tests.helpers import EVAL_YAML, eval_variant
+from tests.helpers import eval_variant, fixed_eval_yaml
 
 NUM_ENVS = 2
 ORIGINAL_HEIGHT = 512
@@ -60,8 +60,8 @@ POLICY_GROUP_SIZES = {
 
 @pytest.fixture
 def policy_config_yaml():
-    """Return the repo's eval config, whose client section drives obs/action translation."""
-    return str(EVAL_YAML)
+    """The fixed test eval config, whose client section drives obs/action translation."""
+    return str(fixed_eval_yaml())
 
 
 @pytest.fixture
